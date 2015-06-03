@@ -4,10 +4,12 @@ import (
 	"bytes"
 	"fmt"
 	"log"
+	"math"
 	"net/url"
 	"os"
 	"strings"
 	"text/template"
+	"time"
 
 	"github.com/amir/raidman"
 	"github.com/samalba/dockerclient"
@@ -36,17 +38,30 @@ type DockerEventInfo struct {
 }
 
 func connectToRiemann(riemannUrl string) *raidman.Client {
-	url, err := url.Parse(riemannUrl)
-	if err != nil {
-		log.Fatalf("Failed to parse Riemann URL %s: %s\n", riemannUrl, err)
+	for i := 0; i < 10; i++ {
+		url, err := url.Parse(riemannUrl)
+		if err != nil {
+			log.Fatalf("Failed to parse Riemann URL %s: %s\n", riemannUrl, err)
+		}
+
+		conn, err := raidman.Dial(url.Scheme, url.Host)
+		if err == nil {
+			log.Printf("connected to riemann on %s", riemannUrl)
+			return conn
+		}
+
+		w := math.Pow(2, float64(i))
+		log.Printf("ERROR: can't connect to riemann: %v - waiting %v seconds", err, w)
+		timerChan := time.After(time.Duration(w) * time.Second)
+
+		select {
+		case <-timerChan:
+			continue
+		}
+
 	}
 
-	conn, err := raidman.Dial(url.Scheme, url.Host)
-	if err != nil {
-		log.Fatalf("Can't connect to riemann host %s: %v\n", riemannUrl, err)
-	}
-
-	return conn
+	panic("can't connect to riemann")
 }
 
 func connectToDocker(dockerHost string) *dockerclient.DockerClient {
@@ -109,11 +124,9 @@ func main() {
 		ec.Attributes[key] = getTemplate(fmt.Sprintf("attribute '%s'", key), &value)
 	}
 
-	riemannClient := connectToRiemann(*riemannUrl)
-	defer riemannClient.Close()
 	dockerClient := connectToDocker(*dockerHost)
 
-	waitForEvents(riemannClient, dockerClient, &ec, *verbose)
+	waitForEvents(*riemannUrl, dockerClient, &ec, *verbose)
 }
 
 func getTemplate(name string, value *string) *template.Template {
@@ -168,17 +181,27 @@ func dockerEventCallback(event *dockerclient.Event, errChan chan error, args ...
 	evChan <- &eventInfo
 }
 
-func eventSender(client *raidman.Client, evChan chan *DockerEventInfo, cfg *EventConfig, verbose bool) {
+func eventSender(riemannUrl string, evChan chan *DockerEventInfo, cfg *EventConfig, verbose bool) {
+	var client *raidman.Client = nil
+
 	for ev := range evChan {
 		if ev == nil {
 			return
 		}
 
-		sendEvent(client, ev, cfg, verbose)
+		if client == nil {
+			client = connectToRiemann(riemannUrl)
+		}
+
+		if !sendEvent(client, ev, cfg, verbose) {
+			client = nil
+			// enqueue message
+			evChan <- ev
+		}
 	}
 }
 
-func sendEvent(client *raidman.Client, info *DockerEventInfo, cfg *EventConfig, verbose bool) {
+func sendEvent(client *raidman.Client, info *DockerEventInfo, cfg *EventConfig, verbose bool) bool {
 	// Set the host, it could be used by templates
 	info.Host = cfg.Host
 
@@ -209,14 +232,17 @@ func sendEvent(client *raidman.Client, info *DockerEventInfo, cfg *EventConfig, 
 
 	if err := client.Send(&ev); err != nil {
 		log.Printf("Can't send metrics to riemann: %s", err)
+		return false
+	} else {
+		return true
 	}
 }
 
-func waitForEvents(riemannClient *raidman.Client, dockerClient *dockerclient.DockerClient, eventConfig *EventConfig, verbose bool) {
+func waitForEvents(riemannUrl string, dockerClient *dockerclient.DockerClient, eventConfig *EventConfig, verbose bool) {
 	eventsChan := make(chan *DockerEventInfo, 10000)
 
 	// start docker events consumer (riemann event sender)
-	go eventSender(riemannClient, eventsChan, eventConfig, verbose)
+	go eventSender(riemannUrl, eventsChan, eventConfig, verbose)
 
 	// start docker events monitor
 	dockerClient.StartMonitorEvents(dockerEventCallback, nil, dockerClient, eventsChan, verbose)
