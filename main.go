@@ -6,6 +6,7 @@ import (
 	"log"
 	"net/url"
 	"os"
+	"strings"
 	"text/template"
 
 	"github.com/amir/raidman"
@@ -134,16 +135,14 @@ func execTemplate(tpl *template.Template, info *DockerEventInfo) string {
 
 func dockerEventCallback(event *dockerclient.Event, errChan chan error, args ...interface{}) {
 	dockerClient := args[0].(*dockerclient.DockerClient)
-	riemannClient := args[1].(*raidman.Client)
-	ec := args[2].(*EventConfig)
-	verbose := args[3].(bool)
+	evChan := args[1].(chan *DockerEventInfo)
+	verbose := args[2].(bool)
 
 	if verbose {
 		log.Printf("Received event %+v", event)
 	}
 
 	eventInfo := DockerEventInfo{
-		Host:          ec.Host,
 		Time:          event.Time,
 		ContainerId:   event.Id,
 		Status:        event.Status,
@@ -161,15 +160,28 @@ func dockerEventCallback(event *dockerclient.Event, errChan chan error, args ...
 	}
 
 	if eventInfo.ContainerInfo.Name != "" {
-		eventInfo.Name = eventInfo.ContainerInfo.Name
+		eventInfo.Name = strings.Replace(eventInfo.ContainerInfo.Name, "/", "", 1)
 	} else {
 		eventInfo.Name = event.Id
 	}
 
-	sendEvent(riemannClient, &eventInfo, ec, verbose)
+	evChan <- &eventInfo
+}
+
+func eventSender(client *raidman.Client, evChan chan *DockerEventInfo, cfg *EventConfig, verbose bool) {
+	for ev := range evChan {
+		if ev == nil {
+			return
+		}
+
+		sendEvent(client, ev, cfg, verbose)
+	}
 }
 
 func sendEvent(client *raidman.Client, info *DockerEventInfo, cfg *EventConfig, verbose bool) {
+	// Set the host, it could be used by templates
+	info.Host = cfg.Host
+
 	tags := make([]string, len(cfg.Tags))
 	for i, tag := range cfg.Tags {
 		tags[i] = execTemplate(tag, info)
@@ -201,6 +213,12 @@ func sendEvent(client *raidman.Client, info *DockerEventInfo, cfg *EventConfig, 
 }
 
 func waitForEvents(riemannClient *raidman.Client, dockerClient *dockerclient.DockerClient, eventConfig *EventConfig, verbose bool) {
-	dockerClient.StartMonitorEvents(dockerEventCallback, nil, dockerClient, riemannClient, eventConfig, verbose)
+	eventsChan := make(chan *DockerEventInfo, 10000)
+
+	// start docker events consumer (riemann event sender)
+	go eventSender(riemannClient, eventsChan, eventConfig, verbose)
+
+	// start docker events monitor
+	dockerClient.StartMonitorEvents(dockerEventCallback, nil, dockerClient, eventsChan, verbose)
 	select {}
 }
