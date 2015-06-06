@@ -59,6 +59,23 @@ ContainerInfo has the following structure:
 Please notice that ContainerInfo (and thus the container's Name) is by design
 unavailable for some event types (such as *destroy*)
 
+#### Heartbeat
+
+An heartbeat event is sent to riemann, the event data is completely configurable by using
+the parameters prefixed by *"--hb-"*.
+If you want to disable the heartbeat you can use an empty string as the *"--hb-service"* parameter:
+
+    $ ./riemann-docker-agent --hb-service=""
+    2015/06/06 12:42:00 Connected to docker @ tcp://192.168.59.103:2375 (version 1.6.2)
+    2015/06/06 12:42:00 heartbeat disabled
+
+The heartbeat event is sent every ttl/2 seconds, by default 30 seconds. You can override it by using
+the *"--hb-ttl"* parameter:
+
+    $ ./riemann-docker-agent --hb-ttl=10
+    2015/06/06 12:43:18 Connected to docker @ tcp://192.168.59.103:2375 (version 1.6.2)
+    2015/06/06 12:43:18 sending heartbeat every 5s
+
 #### Example
 
     $ ./riemann-docker-agent -h my.host -t docker -t 'docker-{{.Status}}' -d 'Docker events for container {{.Name}} created on {{.ContainerInfo.Created}}' -a docker-host={{.Host}} -v

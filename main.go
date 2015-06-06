@@ -102,6 +102,14 @@ func main() {
 		state       = kingpin.Flag("state", "Event state").Default("{{.Status}}").String()
 		metric      = kingpin.Flag("metric", "Event metric").Short('m').Default("0").Float()
 		attributes  = kingpin.Flag("attribute", "Event attributes").Short('a').StringMap()
+
+		hbService     = kingpin.Flag("hb-service", "Heartbeat service").Default("riemann-docker-agent").String()
+		hbTtl         = kingpin.Flag("hb-ttl", "Heartbeat TTL").Default("60").Float()
+		hbDescription = kingpin.Flag("hb-description", "Heartbeat description").Default("docker-agent is alive").String()
+		hbTags        = kingpin.Flag("hb-tag", "Heartbeat tag (can be specified multiple times)").Strings()
+		hbState       = kingpin.Flag("hb-state", "Heartbeat state").Default("ok").String()
+		hbMetric      = kingpin.Flag("hb-metric", "Heartbeat metric").Default("0").Float()
+		hbAttributes  = kingpin.Flag("hb-attribute", "Heartbeat attributes").StringMap()
 	)
 
 	kingpin.Parse()
@@ -124,9 +132,21 @@ func main() {
 		ec.Attributes[key] = getTemplate(fmt.Sprintf("attribute '%s'", key), &value)
 	}
 
+	// heartbeat event
+	hb := raidman.Event{
+		Host:        *host,
+		Description: *hbDescription,
+		Service:     *hbService,
+		Metric:      *hbMetric,
+		State:       *hbState,
+		Tags:        *hbTags,
+		Ttl:         float32(*hbTtl),
+		Attributes:  *hbAttributes,
+	}
+
 	dockerClient := connectToDocker(*dockerHost)
 
-	waitForEvents(*riemannUrl, dockerClient, &ec, *verbose)
+	waitForEvents(*riemannUrl, dockerClient, &ec, &hb, *verbose)
 }
 
 func getTemplate(name string, value *string) *template.Template {
@@ -181,7 +201,17 @@ func dockerEventCallback(event *dockerclient.Event, errChan chan error, args ...
 	evChan <- &eventInfo
 }
 
-func eventSender(riemannUrl string, evChan chan *DockerEventInfo, cfg *EventConfig, verbose bool) {
+func eventTransformer(inChan chan *DockerEventInfo, cfg *EventConfig, outChan chan *raidman.Event) {
+	for ev := range inChan {
+		if ev == nil {
+			return
+		}
+
+		outChan <- getRiemannEvent(ev, cfg)
+	}
+}
+
+func riemannSender(riemannUrl string, evChan chan *raidman.Event, verbose bool) {
 	var client *raidman.Client = nil
 
 	for ev := range evChan {
@@ -193,15 +223,15 @@ func eventSender(riemannUrl string, evChan chan *DockerEventInfo, cfg *EventConf
 			client = connectToRiemann(riemannUrl)
 		}
 
-		if !sendEvent(client, ev, cfg, verbose) {
+		if !sendEvent(client, ev, verbose) {
 			client = nil
-			// enqueue message
+			// re-enqueue message
 			evChan <- ev
 		}
 	}
 }
 
-func sendEvent(client *raidman.Client, info *DockerEventInfo, cfg *EventConfig, verbose bool) bool {
+func getRiemannEvent(info *DockerEventInfo, cfg *EventConfig) *raidman.Event {
 	// Set the host, it could be used by templates
 	info.Host = cfg.Host
 
@@ -226,11 +256,15 @@ func sendEvent(client *raidman.Client, info *DockerEventInfo, cfg *EventConfig, 
 		Attributes:  attributes,
 	}
 
+	return &ev
+}
+
+func sendEvent(client *raidman.Client, ev *raidman.Event, verbose bool) bool {
 	if verbose {
 		log.Printf("Sending event %+v\n", ev)
 	}
 
-	if err := client.Send(&ev); err != nil {
+	if err := client.Send(ev); err != nil {
 		log.Printf("Can't send metrics to riemann: %s", err)
 		return false
 	} else {
@@ -238,13 +272,34 @@ func sendEvent(client *raidman.Client, info *DockerEventInfo, cfg *EventConfig, 
 	}
 }
 
-func waitForEvents(riemannUrl string, dockerClient *dockerclient.DockerClient, eventConfig *EventConfig, verbose bool) {
-	eventsChan := make(chan *DockerEventInfo, 10000)
+func heartbeatGenerator(outChan chan *raidman.Event, ev *raidman.Event, interval time.Duration) {
+	ticker := time.NewTicker(interval)
+	for t := range ticker.C {
+		ev.Time = t.Unix()
+		outChan <- ev
+	}
+}
 
-	// start docker events consumer (riemann event sender)
-	go eventSender(riemannUrl, eventsChan, eventConfig, verbose)
+func waitForEvents(riemannUrl string, dockerClient *dockerclient.DockerClient, eventConfig *EventConfig, heartbeat *raidman.Event, verbose bool) {
+	dockerEventsChan := make(chan *DockerEventInfo, 10000)
+	riemannEventsChan := make(chan *raidman.Event, 10000)
+
+	// heartbeat event generator
+	if heartbeat.Service != "" {
+		interval := time.Duration(heartbeat.Ttl/2) * time.Second
+		log.Printf("sending heartbeat every %s", interval)
+		go heartbeatGenerator(riemannEventsChan, heartbeat, interval)
+	} else {
+		log.Printf("heartbeat disabled")
+	}
+
+	// start docker to riemann events consumer
+	go eventTransformer(dockerEventsChan, eventConfig, riemannEventsChan)
+
+	// start riemann event sender
+	go riemannSender(riemannUrl, riemannEventsChan, verbose)
 
 	// start docker events monitor
-	dockerClient.StartMonitorEvents(dockerEventCallback, nil, dockerClient, eventsChan, verbose)
+	dockerClient.StartMonitorEvents(dockerEventCallback, nil, dockerClient, dockerEventsChan, verbose)
 	select {}
 }
