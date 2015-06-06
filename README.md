@@ -87,3 +87,9 @@ the *"--hb-ttl"* parameter:
     2015/06/03 13:19:42 Sending event {Ttl:0 Time:1433330371 Tags:[docker docker-start] Host:my.host State:start Service:docker test-container start Metric:0 Description:Docker events for container test-container created on 2015-06-03T11:19:30.919873198Z Attributes:map[docker-host:my.host]}
     2015/06/03 13:19:42 Received event &{Id:bd9d6be76033648afedaaa18f5233cf4ab39ab707b50e15dbfbfaaac04e1924a Status:die From:ubuntu:trusty Time:1433330371}
     2015/06/03 13:19:42 Sending event {Ttl:0 Time:1433330371 Tags:[docker docker-die] Host:my.host State:die Service:docker test-container die Metric:0 Description:Docker events for container test-container created on 2015-06-03T11:19:30.919873198Z Attributes:map[docker-host:my.host]}
+
+#### Pre-built binaries
+
+Ubuntu 14.04
+
+[1.0.0](https://github.com/avalente/riemann-docker-agent/raw/master/binaries/ubuntu.1404/1.0.0/riemann-docker-agent)
