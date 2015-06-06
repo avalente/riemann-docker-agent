@@ -16,6 +16,8 @@ import (
 	"gopkg.in/alecthomas/kingpin.v1"
 )
 
+const VERSION = "1.0.0"
+
 type EventConfig struct {
 	Host        string
 	Service     *template.Template
@@ -112,6 +114,7 @@ func main() {
 		hbAttributes  = kingpin.Flag("hb-attribute", "Heartbeat attributes").StringMap()
 	)
 
+	kingpin.Version(VERSION)
 	kingpin.Parse()
 
 	ec := EventConfig{
